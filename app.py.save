@@ -1,0 +1,190 @@
+
+source venv/bin/activate
+from flask import Flask, request, render_template, send_file
+from pptx import Presentation
+from pptx.util import Cm, Pt
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import PP_ALIGN
+import os
+import io
+import re
+import subprocess
+import tempfile
+
+app = Flask(__name__)
+
+# 話者ごとの色設定
+SPEAKER_COLORS = {
+    "話者1": "FFFF00",  # 黄色
+    "話者2": "00FFFF",  # 水色
+    "話者3": "00F900",  # 緑
+    "名前": "FF99FF",   # ピンク
+}
+DEFAULT_COLOR = "FFFFFF"
+MAX_CHARS_PER_SLIDE = 200  # 1スライドの最大文字数
+
+
+def get_color_for_speaker(speaker):
+    """話者名から色コードを取得"""
+    for key in SPEAKER_COLORS:
+        if key in speaker:
+            color = SPEAKER_COLORS[key]
+            return RGBColor(int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16))
+    color = DEFAULT_COLOR
+    return RGBColor(int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16))
+
+
+def clean_text(text):
+    """不要文字の除去"""
+    return text.replace('\x0b', '').strip()
+
+
+def split_text_preserve_speaker(note, max_len=MAX_CHARS_PER_SLIDE):
+    """文を句読点で区切りつつ、話者名を保持したまま分割"""
+    lines = []
+    for para in note.splitlines():
+        speaker_match = re.match(r'(《.+?》)', para)
+        speaker = speaker_match.group(1) if speaker_match else ''
+        content = para[len(speaker):] if speaker else para
+        buffer = ''
+        for char in content:
+            buffer += char
+            if len(buffer) >= max_len or char in "。！？!?":
+                lines.append(speaker + buffer)
+                buffer = ''
+        if buffer:
+            lines.append(speaker + buffer)
+    return lines
+
+
+def add_photo_frame(slide, slide_width, slide_height):
+    """左下に写真枠だけを追加"""
+    margin = Cm(0.5)
+    width = Cm(8)
+    height = Cm(4.5)
+    left = margin
+    top = slide_height - height - margin
+    shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = RGBColor(240, 240, 240)
+    shape.line.color.rgb = RGBColor(100, 100, 100)
+    shape.line.width = Pt(2)
+
+
+def add_page_indicator(slide, index, total, slide_width, slide_height):
+    """左下にページ番号 (1/2 など) を追加"""
+    if total <= 1:
+        return
+    margin = Cm(0.5)
+    textbox = slide.shapes.add_textbox(
+        margin,
+        slide_height - Cm(1.5) - margin,
+        Cm(4),
+        Cm(1.5)
+    )
+    text_frame = textbox.text_frame
+    paragraph = text_frame.paragraphs[0]
+    paragraph.text = f"{index}/{total}"
+    paragraph.alignment = PP_ALIGN.LEFT
+    font = paragraph.font
+    font.size = Pt(24)
+    font.bold = True
+    font.color.rgb = RGBColor(200, 200, 200)
+
+
+def create_script_slides(notes, slide_imgs):
+    """ノート内容からスクリプトスライドを作成"""
+    prs = Presentation()
+    prs.slide_width = Cm(33.867)
+    prs.slide_height = Cm(19.05)
+
+    total = len(notes)
+    for idx, note in enumerate(notes, start=1):
+        note = clean_text(note)
+        lines = split_text_preserve_speaker(note)
+
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        fill = slide.background.fill
+        fill.solid()
+        fill.fore_color.rgb = RGBColor(0, 0, 0)
+
+        # テキストボックス
+        txBox = slide.shapes.add_textbox(
+            left=Cm(0.79), top=Cm(0.8), width=Cm(32.31), height=Cm(15.6)
+        )
+        tf = txBox.text_frame
+        tf.word_wrap = True
+
+        for line in lines:
+            speaker_match = re.match(r'《(.+?)》', line)
+            speaker = speaker_match.group(1) if speaker_match else ''
+            rgb = get_color_for_speaker(speaker)
+
+            p = tf.add_paragraph()
+            p.space_before = Pt(0)
+            p.space_after = Pt(0)
+            run = p.add_run()
+            run.text = line
+            font = run.font
+            font.name = 'メイリオ'
+            font.size = Pt(40)
+            font.bold = True
+            font.color.rgb = rgb
+
+        # 左下に写真枠
+        add_photo_frame(slide, prs.slide_width, prs.slide_height)
+
+        # ページ番号
+        add_page_indicator(slide, idx, total, prs.slide_width, prs.slide_height)
+
+    return prs
+
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        file = request.files['pptx_file']
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = os.path.join(temp_dir, 'input.pptx')
+            file.save(input_path)
+
+            subprocess.run([
+                "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                "--headless", "--convert-to", "png",
+                "--outdir", temp_dir, input_path
+            ], check=True)
+
+            slide_imgs = sorted([
+                os.path.join(temp_dir, f)
+                for f in os.listdir(temp_dir)
+                if f.lower().endswith('.png')
+            ])
+
+            prs = Presentation(input_path)
+            notes = []
+            for slide in prs.slides:
+                if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
+                    text = slide.notes_slide.notes_text_frame.text
+                    cleaned = clean_text(text)
+                    if cleaned:
+                        notes.append(cleaned)
+
+            new_prs = create_script_slides(notes, slide_imgs)
+            output = io.BytesIO()
+            new_prs.save(output)
+            output.seek(0)
+
+            return send_file(
+                output,
+                as_attachment=True,
+                download_name="スクリプトスライド_自動生成.pptx",
+                mimetype='application/vnd.openxmlformats-officedocument.presentationml.presentation'
+            )
+
+    return render_template('index.html')
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
+

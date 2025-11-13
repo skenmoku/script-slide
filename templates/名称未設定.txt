@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>スクリプトスライド生成</title>
+</head>
+<body>
+  <h1>PowerPointファイルをアップロード</h1>
+  <form method="POST" enctype="multipart/form-data">
+    <label>PowerPointファイル（.pptx）</label><br>
+    <input type="file" name="pptx_file" accept=".pptx" required><br><br>
+    <button type="submit">変換してダウンロード</button>
+  </form>
+</body>
+</html>
