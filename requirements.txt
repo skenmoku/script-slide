@@ -1,0 +1,4 @@
+flask
+python-pptx
+lxml
+Pillow
